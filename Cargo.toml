@@ -1,0 +1,12 @@
+[package]
+name = "megastore_unifecaf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+bincode = "1.3.3"
+memmap2 = "0.9.10"
+petgraph = "0.8.3"
+rand = "0.10.0"
+serde = { version = "1.0.228", features = ["derive"] }
