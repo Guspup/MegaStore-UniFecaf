@@ -1,163 +1,221 @@
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::Undirected;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Write, Read};
 use std::time::Instant;
-use memmap2::Mmap;
 use rand::RngExt;
 
-// --- Estruturas de Dados ---
+// --- Dicionário de Termos (Otimização Principal) ---
+#[derive(Default, Serialize, Deserialize)]
+struct StringPool {
+    forward: HashMap<String, u32>,
+    reverse: HashMap<u32, String>,
+    next_id: u32,
+}
 
+impl StringPool {
+    fn get_or_intern(&mut self, s: &str) -> u32 {
+        let s = s.to_lowercase();
+        if let Some(&id) = self.forward.get(&s) { return id; }
+        let id = self.next_id;
+        self.forward.insert(s.clone(), id);
+        self.reverse.insert(id, s);
+        self.next_id += 1;
+        id
+    }
+    fn resolve(&self, id: u32) -> &str {
+        self.reverse.get(&id).map(|s| s.as_str()).unwrap_or("Desconhecido")
+    }
+}
+
+// --- Estrutura Otimizada (Usa IDs em vez de Strings repetidas) ---
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Product {
     id: u32,
-    name: String,
-    brand: String,
-    category: String,
+    name: String,       // Nome permanece string por ser único
+    brand_id: u32,      // Otimizado: ID numérico
+    category_id: u32,   // Otimizado: ID numérico
+    price: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum NodeType {
-    Product(u32), // ID do produto
-    Term(String), // Nome, Marca ou Categoria
+    Product(u32),
+    Term(u32), // Grafo agora usa apenas IDs numéricos
 }
 
 struct MegaStoreSearch {
+    products: Vec<Product>,
+    pool: StringPool,
     graph: Graph<NodeType, (), Undirected>,
-    term_to_node: HashMap<String, NodeIndex>,
-    products_mmap: Mmap,
-    offsets: HashMap<u32, usize>, // Mapeia ID do produto para sua posição no arquivo binário
+    term_to_node: HashMap<u32, NodeIndex>,
+    product_to_node: HashMap<u32, NodeIndex>,
 }
 
 impl MegaStoreSearch {
-    fn new(binary_file_path: &str) -> anyhow::Result<Self> {
-        let file = File::open(binary_file_path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
+    fn init(data_path: &str) -> io::Result<Self> {
+        let mut products = Vec::new();
+        let pool = StringPool::default(); // Removido o 'mut'
+        let mut file = File::open(data_path)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        
+        let mut cursor = 0;
+        while cursor + 4 <= buffer.len() {
+            let len = u32::from_le_bytes(buffer[cursor..cursor+4].try_into().unwrap()) as usize;
+            cursor += 4;
+            let product: Product = bincode::deserialize(&buffer[cursor..cursor+len]).unwrap();
+            cursor += len;
+            products.push(product);
+        }
 
-        Ok(MegaStoreSearch {
+        let mut engine = MegaStoreSearch {
+            products,
+            pool,
             graph: Graph::new_undirected(),
             term_to_node: HashMap::new(),
-            products_mmap: mmap,
-            offsets: HashMap::new(),
-        })
+            product_to_node: HashMap::new(),
+        };
+
+        engine.build_graph();
+        Ok(engine)
     }
 
-    // Adiciona um termo ao índice do grafo e conecta ao produto
-    fn add_relation(&mut self, term: &str, product_node: NodeIndex) {
-        let term_lc = term.to_lowercase();
-        let term_node = *self.term_to_node.entry(term_lc).or_insert_with(|| {
-            self.graph.add_node(NodeType::Term(term.to_string()))
+    fn build_graph(&mut self) {
+        println!("--- Otimização: Mapeando termos em inteiros... ---");
+        // Adiciona marcas e categorias ao pool durante a construção
+        let products_copy = self.products.clone();
+        for p in &products_copy {
+            let p_node = self.graph.add_node(NodeType::Product(p.id));
+            self.product_to_node.insert(p.id, p_node);
+
+            // Linkar IDs numéricos no grafo
+            self.link_id(p_node, p.brand_id);
+            self.link_id(p_node, p.category_id);
+            
+            // Indexar palavras do nome também como IDs
+            for word in p.name.split_whitespace() {
+                let w_id = self.pool.get_or_intern(word);
+                self.link_id(p_node, w_id);
+            }
+        }
+    }
+
+    fn link_id(&mut self, p_node: NodeIndex, term_id: u32) {
+        let t_node = *self.term_to_node.entry(term_id).or_insert_with(|| {
+            self.graph.add_node(NodeType::Term(term_id))
         });
-        self.graph.add_edge(product_node, term_node, ());
+        self.graph.add_edge(p_node, t_node, ());
     }
 
-    // Busca produtos por um termo e retorna os detalhes completos
-    fn search(&self, query: &str) -> Vec<Product> {
+    fn search(&self, query: &str) -> Vec<&Product> {
         let query_lc = query.to_lowercase();
-        let mut results = Vec::new();
+        // Converte a busca em ID primeiro (Muito rápido!)
+        if let Some(&term_id) = self.pool.forward.get(&query_lc) {
+            if let Some(&t_node) = self.term_to_node.get(&term_id) {
+                return self.graph.neighbors(t_node)
+                    .filter_map(|n| {
+                        if let NodeType::Product(id) = self.graph[n] {
+                            self.products.iter().find(|p| p.id == id)
+                        } else { None }
+                    })
+                    .collect();
+            }
+        }
+        vec![]
+    }
 
-        if let Some(&node_idx) = self.term_to_node.get(&query_lc) {
-            for neighbor in self.graph.neighbors(node_idx) {
-                if let NodeType::Product(id) = self.graph[neighbor] {
-                    if let Ok(product) = self.get_product_by_id(id) {
-                        results.push(product);
+    fn get_recs(&self, p: &Product) -> Vec<(&Product, &str)> {
+        let mut recs = Vec::new();
+        let mut seen = HashSet::new();
+        seen.insert(p.id);
+
+        if let Some(&p_node) = self.product_to_node.get(&p.id) {
+            for t_node in self.graph.neighbors(p_node) {
+                for sib in self.graph.neighbors(t_node) {
+                    if let NodeType::Product(id) = self.graph[sib] {
+                        if !seen.contains(&id) && recs.len() < 3 {
+                            seen.insert(id);
+                            let rel = self.products.iter().find(|pr| pr.id == id).unwrap();
+                            let tipo = if rel.category_id == p.category_id { "Concorrente" } else { "Complemento" };
+                            recs.push((rel, tipo));
+                        }
                     }
                 }
             }
         }
-        results
-    }
-
-    // Recupera os dados do produto do arquivo binário usando o offset (O(1) de acesso ao disco)
-    fn get_product_by_id(&self, id: u32) -> anyhow::Result<Product> {
-        let &pos = self.offsets.get(&id).ok_or_else(|| anyhow::anyhow!("ID não encontrado"))?;
-        let len = u32::from_le_bytes(self.products_mmap[pos..pos+4].try_into()?) as usize;
-        let product: Product = bincode::deserialize(&self.products_mmap[pos+4..pos+4+len])?;
-        Ok(product)
+        recs
     }
 }
 
-// --- Gerador de Dados para Teste ---
-
-fn generate_sample_data(path: &str, count: usize) -> anyhow::Result<()> {
-    println!("--- Gerador: Criando {} produtos no formato binário ---", count);
+fn generate_demo_data(path: &str) -> io::Result<()> {
+    println!("--- Gerador: Criando base com Dicionário de Termos ---");
+    let mut pool = StringPool::default();
+    let cats = ["Notebook", "Monitor", "Mouse", "Teclado", "Cadeira"];
+    let brands = ["Dell", "Samsung", "Logitech", "Razer", "Apple"];
+    
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
-
-    let brands = vec!["Sony", "Samsung", "Apple", "LG", "Dell", "HP"];
-    let categories = vec!["Eletrônicos", "Informática", "Eletrodomésticos", "Games", "Áudio"];
     let mut rng = rand::rng();
 
-    for i in 0..count {
+    for i in 0..3000 {
+        let b_str = brands[rng.random_range(0..5)];
+        let c_str = cats[rng.random_range(0..5)];
+        
         let product = Product {
             id: i as u32,
-            name: format!("Produto Especial {}", i),
-            brand: brands[rng.random_range(0..brands.len())].to_string(),
-            category: categories[rng.random_range(0..categories.len())].to_string(),
+            name: format!("{} {} Otimizado", b_str, c_str),
+            brand_id: pool.get_or_intern(b_str),
+            category_id: pool.get_or_intern(c_str),
+            price: rng.random_range(100.0..5000.0),
         };
-        let bytes = bincode::serialize(&product)?;
-        let len = bytes.len() as u32;
-        writer.write_all(&len.to_le_bytes())?; // Salva o tamanho para leitura posterior
+        let bytes = bincode::serialize(&product).unwrap();
+        writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
         writer.write_all(&bytes)?;
     }
-    writer.flush()?;
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> io::Result<()> {
     let data_path = "products.bin";
-    let product_count = 200; // Alterado para 200 para o seu teste inicial
+    let _ = fs::remove_file(data_path);
+    generate_demo_data(data_path)?;
 
-    // 1. Forçar a regeneração dos dados para o novo formato/quantidade
-    generate_sample_data(data_path, product_count)?;
+    let engine = MegaStoreSearch::init(data_path)?;
 
-    // 2. Inicializar o motor
-    println!("--- Motor: Inicializando Grafo e Mapeamento de Memória ---");
-    let mut engine = MegaStoreSearch::new(data_path)?;
+    println!("\n==========================================");
+    println!("    MEGASTORE: MOTOR GRAFO OTIMIZADO      ");
+    println!("     (Dicionário de Termos Ativado)       ");
+    println!("==========================================");
 
-    // 3. Indexar o catálogo (Lê o binário uma vez para montar o Grafo)
-    let mut current_pos = 0;
-    while current_pos + 4 <= engine.products_mmap.len() {
-        let start_of_record = current_pos;
-        let len = u32::from_le_bytes(engine.products_mmap[current_pos..current_pos+4].try_into()?) as usize;
-        current_pos += 4;
-        
-        let product: Product = bincode::deserialize(&engine.products_mmap[current_pos..current_pos+len])?;
-        
-        // Registra o offset para busca rápida posterior
-        engine.offsets.insert(product.id, start_of_record);
+    loop {
+        print!("\nBusca [Marca ou Categoria]> ");
+        io::stdout().flush()?;
+        let mut q = String::new();
+        io::stdin().read_line(&mut q)?;
+        let q = q.trim();
+        if q == "sair" { break; }
 
-        // Cria o nó do produto no grafo
-        let p_node = engine.graph.add_node(NodeType::Product(product.id));
-
-        // Cria as referências (Arestas)
-        engine.add_relation(&product.brand, p_node);
-        engine.add_relation(&product.category, p_node);
-        for word in product.name.split_whitespace() {
-            engine.add_relation(word, p_node);
-        }
-
-        current_pos += len;
-    }
-    println!("Catálogo indexado com sucesso!");
-
-    // 4. Interface de Busca Simples
-    let queries = vec!["Sony", "Eletrônicos", "Especial"];
-    
-    println!("\n--- Teste de Busca MegaStore ---");
-    for q in queries {
         let start = Instant::now();
         let results = engine.search(q);
-        println!("\nBusca por: '{}' (Levou: {:?})", q, start.elapsed());
-        println!("Resultados encontrados: {}", results.len());
         
-        // Mostra os primeiros 3 resultados detalhados
-        for p in results.iter().take(3) {
-            println!("  > [ID: {:03}] {} | Marca: {} | Categoria: {}", p.id, p.name, p.brand, p.category);
+        if results.is_empty() {
+            println!("Nenhum resultado.");
+        } else {
+            for p in results.iter().take(3) {
+                let marca = engine.pool.resolve(p.brand_id);
+                println!("\n[ID: {:04}] {:<25} | R$ {:>8.2} | Marca: {}", 
+                         p.id, p.name, p.price, marca);
+                
+                for (r, tipo) in engine.get_recs(p) {
+                    println!("   -> {:<12}: [ID: {:04}] {:<20} | R$ {:>8.2}", 
+                             format!("[{}]", tipo), r.id, r.name, r.price);
+                }
+            }
+            println!("\nBusca concluída em: {:?}", start.elapsed());
         }
     }
-
     Ok(())
 }
