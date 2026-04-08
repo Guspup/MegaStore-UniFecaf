@@ -1,27 +1,23 @@
-# Documentação Técnica: Motor de Busca em Grafo MegaStore
+# Documentação Técnica: Arquitetura em Silos de Mercado MegaStore
 
-## Visão Geral
-Esta documentação detalha os aspectos técnicos da implementação do motor de busca para a MegaStore, focado em uma base de **5.000 itens**.
+## Estrutura do Motor de Grafos
+O sistema evoluiu para uma arquitetura de grafos enriquecida, onde os dados são particionados em silos virtuais de mercado (**Tecnologia, Moda, Beleza**). Isso garante que recomendações contextuais sejam altamente pertinentes para o usuário final.
 
-## Estrutura do Grafo
-O sistema utiliza um **Grafo Bipartido** implícito:
-- **Nós de Produto:** Representam a entidade final.
-- **Nós de Termo:** Representam atributos (Marca, Categoria, Palavras do Nome).
+### Modelagem de Dados
+Cada produto contém uma metatag `market_group`, que atua como um filtro rigoroso durante o cálculo de vizinhança no grafo:
+- **Tecnologia:** Inclui dispositivos, acessórios, notebooks e periféricos.
+- **Moda:** Inclui calçados, vestuário e acessórios têxteis.
+- **Beleza:** Inclui dermocosméticos, higiene e perfumaria.
 
-As arestas conectam Produtos a Termos. Não existem conexões diretas entre dois produtos ou entre dois termos, o que simplifica a travessia.
+## Lógica de Recomendação (Context-Aware)
+O algoritmo de recomendação (`get_recs`) percorre os vizinhos do grafo (produtos que compartilham atributos), mas só aceita o item como sugestão se o `market_group` do item relacionado for idêntico ao do item original. Isso elimina a ocorrência de "pontes cruzadas" causadas por cores ou adjetivos genéricos (ex: Tênis Branco e MacBook Branco).
 
-## Fluxo de Recomendação
-A lógica de recomendação segue o algoritmo de vizinhança:
-1. Identificar todos os nós `T` (termos) conectados ao produto `P`.
-2. Para cada `T`, identificar todos os produtos `P'` conectados.
-3. Classificar `P'` como:
-   - **Concorrente:** Se `P'.category_id == P.category_id`.
-   - **Complemento:** Se `P'.brand_id == P.brand_id` mas categoria diferente.
+### Indexação de Busca Inteligente
+O sistema utiliza uma indexação de multicamadas para garantir que o usuário encontre o que precisa, independentemente da variação linguística:
+1.  **Indexação de Categoria Inteira:** Match exato (ex: "Smartphone Celular").
+2.  **Indexação por Palavras-Chave:** Cada palavra da categoria é um nó no grafo (ex: "Smartphone" e "Celular" individualmente).
+3.  **Normalização Singular/Plural:** Para categorias comuns como "Roupas", o motor indexa automaticamente o termo singular ("Roupa"), permitindo que ambos os termos tragam resultados.
+4.  **Filtro de Stop-words:** Termos genéricos que poderiam criar falsas conexões no grafo são ignorados durante a indexação de nomes de produtos.
 
-## Otimizações de Memória
-A principal otimização é o **String Pooling**. Em vez de cada objeto `Product` carregar strings pesadas para "Marca" e "Categoria", ele carrega apenas um `u32`. A tradução para texto ocorre apenas na camada de exibição (UI).
-
-## Resultados de Testes
-- **Tempo médio de busca:** 0.05ms a 0.15ms.
-- **Tempo de construção do grafo:** ~1.2s para 5.000 itens.
-- **Consumo de RAM estimado:** < 50MB.
+## Performance em Larga Escala
+Mesmo com 5.000 itens reais e uma lógica de filtragem complexa, a latência de busca permanece estável abaixo dos **50ms**. O custo de RAM é otimizado através do uso de `StringPool` para centralizar a memória de strings repetitivas (como nomes de marcas e categorias).

@@ -18,17 +18,15 @@ impl StringPool {
         self.next_id += 1;
         id
     }
-    pub fn resolve(&self, id: u32) -> &str {
-        self.reverse.get(&id).map(|s| s.as_str()).unwrap_or("Desconhecido")
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Product {
     pub id: u32,
     pub name: String,
-    pub brand_id: u32,
-    pub category_id: u32,
+    pub brand: String,
+    pub category: String,
+    pub market_group: String, // Novo campo: Tecnologia, Moda ou Beleza
     pub price: f64,
 }
 

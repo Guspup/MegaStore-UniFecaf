@@ -9,46 +9,58 @@ use engine::MegaStoreSearch;
 use utils::generate_demo_data;
 
 fn main() -> io::Result<()> {
-    let data_path = "products.bin";
+    let data_path = "data/products.bin";
     
-    // Gera dados se não existirem (ou recria para o teste)
     if !fs::metadata(data_path).is_ok() {
+        fs::create_dir_all("data")?;
         generate_demo_data(data_path)?;
     }
 
     let engine = MegaStoreSearch::init(data_path)?;
 
-    println!("\n==========================================");
+    // Cores ANSI
+    let blue = "\x1b[34m";
+    let green = "\x1b[32m";
+    let yellow = "\x1b[33m";
+    let cyan = "\x1b[36m";
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+
+    println!("\n{}{}{}", bold, blue, "==========================================");
     println!("          MEGASTORE: MOTOR DE GRAFO       ");
-    println!("==========================================");
+    println!("=========================================={}", reset);
+    println!("{}Dica: Busque por 'celular', 'nike', 'apple' ou 'computador'{}", yellow, reset);
 
     loop {
-        print!("\nBusca [Marca ou Categoria]> ");
+        print!("\n{}Busca [Marca ou Categoria]>{} ", bold, reset);
         io::stdout().flush()?;
+        
         let mut q = String::new();
         io::stdin().read_line(&mut q)?;
         let q = q.trim();
-        if q == "sair" || q.is_empty() { break; }
+
+        if q == "sair" { break; }
+        if q.is_empty() { continue; } // Não sai em linha vazia
 
         let start = Instant::now();
         let results = engine.search(q);
         
         if results.is_empty() {
-            println!("Nenhum resultado.");
+            println!("{}Nenhum resultado encontrado para '{}'.{}", yellow, q, reset);
         } else {
             for p in results.iter().take(3) {
-                let marca = engine.pool.resolve(p.brand_id);
-                let categoria = engine.pool.resolve(p.category_id);
-                println!("\n[ID: {:04}] {:<35} | R$ {:>8.2}", 
-                         p.id, p.name, p.price);
-                println!("   Categoria: {:<12} | Marca: {}", categoria, marca);
+                println!("\n{}[ID: {:04}] {:<35} | {}{}{}R$ {:>8.2}{}", 
+                         cyan, p.id, p.name, reset, green, bold, p.price, reset);
+                println!("   {}Categoria:{} {:<18} | {}Marca:{} {}", 
+                         blue, reset, p.category, blue, reset, p.brand);
                 
                 for (r, tipo) in engine.get_recs(p) {
-                    println!("   -> {:<12}: [ID: {:04}] {:<20} | R$ {:>8.2}", 
-                             format!("[{}]", tipo), r.id, r.name, r.price);
+                    let cor_tipo = if tipo == "Concorrente" { "\x1b[31m" } else { "\x1b[35m" };
+                    println!("   {}-> {:<12}{} [ID: {:04}] {:<25} | R$ {:>8.2}", 
+                             cor_tipo, format!("[{}]", tipo), reset, r.id, r.name, r.price);
                 }
             }
-            println!("\nBusca concluída em: {:?}", start.elapsed());
+            println!("\n{}Busca concluída em: {:?}{}", yellow, start.elapsed(), reset);
         }
     }
     Ok(())
